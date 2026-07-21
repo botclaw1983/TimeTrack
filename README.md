@@ -50,10 +50,17 @@ python main.py
 
 ### Как собрать (на компьютере, где есть Python)
 
-1. Откройте командную строку в папке проекта.
-2. Выполните:
+В **PowerShell** из папки проекта:
+
+```powershell
+cd C:\Users\yu.lapova\Documents\GitHub\TimeTrack
+.\build_portable.bat
+```
+
+Или в **cmd**:
 
 ```bat
+cd /d C:\Users\yu.lapova\Documents\GitHub\TimeTrack
 build_portable.bat
 ```
 
@@ -67,9 +74,19 @@ portable\TimeTrack\
 
 ### Как перенести на другой ноутбук
 
-1. Скопируйте **всю** папку `portable\TimeTrack` (на флешку, в «Документы» и т.п.).
+**Вариант A — из репозитория** (если папка `portable\TimeTrack` уже залита в GitHub):
+
+1. Скачайте репозиторий (Code → Download ZIP) или только папку `portable\TimeTrack`.
+2. Распакуйте и запустите `TimeTrack.exe`.
+
+**Вариант B — с флешки / копированием:**
+
+1. Скопируйте **всю** папку `portable\TimeTrack`.
 2. На другом компьютере запустите `TimeTrack.exe`.
-3. Python, установщик и права администратора **не нужны**.
+
+В обоих случаях Python, установщик и права администратора **не нужны**.
+
+Сначала соберите portable у себя (`.\build_portable.bat`), затем закоммитьте папку `portable\TimeTrack` в репозиторий (кроме `data\` — личная статистика в git не попадает).
 
 ### Где хранятся данные в portable
 
@@ -83,6 +100,7 @@ portable\TimeTrack\
 ### Важно
 
 - Копировать нужно всю папку, а не только `TimeTrack.exe`.
+- Папка сборки большая (часто 100+ МБ). Если GitHub не примет push, лучше выложить zip в [Releases](https://docs.github.com/en/repositories/releasing-projects-on-github) и дать ссылку человеку.
 - Антивирус иногда блокирует `.exe`, собранные через PyInstaller. В таком случае добавьте папку в исключения или попросите IT.
 
 ## Структура

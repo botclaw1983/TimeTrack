@@ -6,5 +6,5 @@ __pycache__/
 .mypy_cache/
 build/
 dist/
-portable/TimeTrack/
 *.spec.bak
+portable/TimeTrack/
