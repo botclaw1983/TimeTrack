@@ -5,10 +5,25 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
 from formatting import format_duration
+
+
+def _fallback_icon() -> QIcon:
+    pixmap = QPixmap(64, 64)
+    pixmap.fill(QColor("#1c242b"))
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QColor("#f3f5f7"))
+    painter.setBrush(QColor("#3d4a55"))
+    painter.drawEllipse(8, 8, 48, 48)
+    painter.setBrush(QColor("#f3f5f7"))
+    painter.drawEllipse(28, 14, 8, 8)
+    painter.drawRect(30, 28, 4, 16)
+    painter.end()
+    return QIcon(pixmap)
 
 
 class TrayController(QObject):
@@ -18,7 +33,8 @@ class TrayController(QObject):
 
     def __init__(self, icon_path: Path, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self._tray = QSystemTrayIcon(QIcon(str(icon_path)), parent)
+        icon = QIcon(str(icon_path)) if icon_path.exists() else _fallback_icon()
+        self._tray = QSystemTrayIcon(icon, parent)
         self._tray.setToolTip("TimeTrack")
         self._pause_action = QAction("Пауза", self)
         self._pause_action.triggered.connect(self.pause_toggled.emit)

@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon
 
+from paths import is_portable, resource_path
 from storage import Storage
 from tracker import ActivityTracker
 from ui.stats_window import StatsWindow
 from ui.tray import TrayController
 
-ROOT = Path(__file__).resolve().parent
-ICON_PATH = ROOT / "resources" / "icon.png"
+ICON_PATH = resource_path("resources", "icon.png")
 
 
 def main() -> int:
@@ -21,6 +21,9 @@ def main() -> int:
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("TimeTrack")
     app.setOrganizationName("TimeTrack")
+
+    if is_portable():
+        QSettings.setDefaultFormat(QSettings.Format.IniFormat)
 
     if not QSystemTrayIcon.isSystemTrayAvailable():
         QMessageBox.critical(
@@ -51,6 +54,10 @@ def main() -> int:
         total, active = tracker.today_stats()
         tray.update_tooltip(total, active, paused)
 
+    def on_manual_time_added() -> None:
+        total, active = tracker.today_stats()
+        tray.update_tooltip(total, active, tracker.paused)
+
     def quit_app() -> None:
         tracker.stop()
         tray.hide()
@@ -62,6 +69,7 @@ def main() -> int:
     tray.quit_requested.connect(quit_app)
     tracker.stats_updated.connect(on_stats_updated)
     tracker.paused_changed.connect(on_paused_changed)
+    stats_window.manual_time_added.connect(on_manual_time_added)
 
     tray.show()
     tracker.start()

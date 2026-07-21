@@ -4,3 +4,7 @@ __pycache__/
 *.db
 .pytest_cache/
 .mypy_cache/
+build/
+dist/
+portable/TimeTrack/
+*.spec.bak
