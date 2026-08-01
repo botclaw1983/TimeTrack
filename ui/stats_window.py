@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from PySide6.QtCore import Qt, QDate, QSettings, Signal
+from PySide6.QtCore import Qt, QDate, QSettings, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 from apps import TRACKED_APPS
 from formatting import format_duration, format_percent
 from paths import is_portable, settings_path
-from storage import PeriodStats, Storage
+from storage import AppSessionRow, PeriodStats, Storage
 
 WEEKDAYS_RU = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
 
@@ -37,10 +37,12 @@ COL_START = 1
 COL_END = 2
 COL_TOTAL = 3
 COL_ACTIVE = 4
-COL_MANUAL = 5
-COL_APPS_START = 6
+COL_RATIO = 5
+COL_MANUAL = 6
+COL_APPS_START = 7
 
 DETAIL_COLS = ("Дата", "Начало", "Окончание", "Программа", "Общее", "Активное")
+DETAIL_MIN_SECONDS = 30  # не показывать очень короткие сессии
 
 
 class StatsWindow(QMainWindow):
@@ -212,6 +214,7 @@ class StatsWindow(QMainWindow):
             "Окончание",
             "Общее",
             "Активное",
+            "% активного",
             "Добавлено вручную",
             *[app.title for app in TRACKED_APPS],
         ]
@@ -259,9 +262,24 @@ class StatsWindow(QMainWindow):
         detail_page = QWidget()
         detail_layout = QVBoxLayout(detail_page)
         detail_layout.setContentsMargins(0, 12, 0, 0)
-        detail_hint = QLabel("Полная детализация по сессиям программ")
-        detail_hint.setStyleSheet("color: #5a6570;")
-        detail_layout.addWidget(detail_hint)
+        detail_layout.setSpacing(12)
+
+        detail_controls = QHBoxLayout()
+        detail_controls.setSpacing(8)
+        detail_date_label = QLabel("День")
+        detail_date_label.setStyleSheet("color: #5a6570;")
+        self._detail_date = QDateEdit()
+        self._detail_date.setCalendarPopup(True)
+        self._detail_date.setDisplayFormat("dd.MM.yyyy")
+        self._detail_date.setDate(QDate.currentDate())
+        self._detail_date.dateChanged.connect(self._on_detail_date_changed)
+        self._detail_hint = QLabel("Сессии только за выбранный день")
+        self._detail_hint.setStyleSheet("color: #5a6570;")
+        detail_controls.addWidget(detail_date_label)
+        detail_controls.addWidget(self._detail_date)
+        detail_controls.addWidget(self._detail_hint)
+        detail_controls.addStretch()
+        detail_layout.addLayout(detail_controls)
 
         self._detail_table = QTableWidget(0, len(DETAIL_COLS))
         self._detail_table.setHorizontalHeaderLabels(list(DETAIL_COLS))
@@ -270,18 +288,27 @@ class StatsWindow(QMainWindow):
         self._detail_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self._detail_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._detail_table.setShowGrid(False)
+        self._detail_table.verticalHeader().setDefaultSectionSize(28)
         detail_header = self._detail_table.horizontalHeader()
-        detail_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        detail_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        detail_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        # Interactive быстрее ResizeToContents при тысячах строк.
+        detail_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        detail_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        detail_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
         detail_header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        detail_header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        detail_header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        detail_header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
+        detail_header.setSectionResizeMode(5, QHeaderView.ResizeMode.Interactive)
+        self._detail_table.setColumnWidth(0, 130)
+        self._detail_table.setColumnWidth(1, 70)
+        self._detail_table.setColumnWidth(2, 70)
+        self._detail_table.setColumnWidth(4, 100)
+        self._detail_table.setColumnWidth(5, 100)
         self._detail_table.setAlternatingRowColors(True)
         detail_layout.addWidget(self._detail_table, stretch=1)
 
         self._tabs.addTab(summary_page, "Сводка")
         self._tabs.addTab(detail_page, "Детализация")
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+        self._detail_load_token = 0
 
         self._load_filters()
         self._seed_custom_on_switch = True
@@ -304,7 +331,13 @@ class StatsWindow(QMainWindow):
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        self.refresh()
+        self._refresh_summary()
+        if self._tabs.currentIndex() == 1:
+            self._schedule_detail_refresh()
+
+    def refresh(self) -> None:
+        """Обновить только сводку. Детализацию не трогаем — иначе UI подвисает."""
+        self._refresh_summary()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         self._save_filters()
@@ -312,6 +345,7 @@ class StatsWindow(QMainWindow):
         self.hide()
 
     def hideEvent(self, event) -> None:  # noqa: N802
+        self._clear_detail_table()
         self._save_filters()
         super().hideEvent(event)
 
@@ -346,6 +380,10 @@ class StatsWindow(QMainWindow):
         )
         show_manual = self._load_bool("stats/show_manual_column", True)
         show_apps = self._load_bool("stats/show_apps_columns", True)
+        detail_day = self._parse_saved_date(
+            str(self._settings.value("stats/detail_date", "")),
+            QDate.currentDate(),
+        )
 
         self._period_combo.blockSignals(True)
         self._anchor_date.blockSignals(True)
@@ -353,6 +391,7 @@ class StatsWindow(QMainWindow):
         self._to_date.blockSignals(True)
         self._show_manual_col.blockSignals(True)
         self._show_apps_col.blockSignals(True)
+        self._detail_date.blockSignals(True)
 
         index = self._period_combo.findData(mode)
         self._period_combo.setCurrentIndex(index if index >= 0 else 0)
@@ -361,6 +400,7 @@ class StatsWindow(QMainWindow):
         self._to_date.setDate(to_date)
         self._show_manual_col.setChecked(show_manual)
         self._show_apps_col.setChecked(show_apps)
+        self._detail_date.setDate(detail_day)
 
         is_custom = self._period_combo.currentData() == "custom"
         self._custom_range.setVisible(is_custom)
@@ -372,6 +412,7 @@ class StatsWindow(QMainWindow):
         self._to_date.blockSignals(False)
         self._show_manual_col.blockSignals(False)
         self._show_apps_col.blockSignals(False)
+        self._detail_date.blockSignals(False)
 
     def _save_filters(self) -> None:
         self._settings.setValue("stats/period_mode", self._period_combo.currentData())
@@ -389,6 +430,10 @@ class StatsWindow(QMainWindow):
         )
         self._settings.setValue("stats/show_manual_column", self._show_manual_col.isChecked())
         self._settings.setValue("stats/show_apps_columns", self._show_apps_col.isChecked())
+        self._settings.setValue(
+            "stats/detail_date",
+            self._qdate_to_date(self._detail_date.date()).isoformat(),
+        )
         self._settings.sync()
 
     def _on_period_mode_changed(self) -> None:
@@ -431,6 +476,31 @@ class StatsWindow(QMainWindow):
         self._apply_column_visibility()
         self._save_filters()
 
+    def _on_detail_date_changed(self) -> None:
+        self._save_filters()
+        if self._tabs.currentIndex() == 1:
+            self._schedule_detail_refresh()
+
+    def _on_tab_changed(self, index: int) -> None:
+        if index == 1:
+            self._schedule_detail_refresh()
+        else:
+            # Очищаем тяжёлую таблицу — иначе переключение вкладки подвисает.
+            self._clear_detail_table()
+
+    def _schedule_detail_refresh(self) -> None:
+        self._detail_load_token += 1
+        token = self._detail_load_token
+        QTimer.singleShot(0, lambda: self._refresh_detail(token))
+
+    def _clear_detail_table(self) -> None:
+        self._detail_load_token += 1
+        self._detail_table.setUpdatesEnabled(False)
+        self._detail_table.clearContents()
+        self._detail_table.setRowCount(0)
+        self._detail_table.setUpdatesEnabled(True)
+        self._detail_hint.setText("Сессии только за выбранный день")
+
     def _apply_column_visibility(self) -> None:
         self._table.setColumnHidden(COL_MANUAL, not self._show_manual_col.isChecked())
         show_apps = self._show_apps_col.isChecked()
@@ -443,7 +513,14 @@ class StatsWindow(QMainWindow):
             return
         day_value = items[0].data(Qt.ItemDataRole.UserRole)
         if isinstance(day_value, date):
-            self._manual_date.setDate(QDate(day_value.year, day_value.month, day_value.day))
+            qday = QDate(day_value.year, day_value.month, day_value.day)
+            self._manual_date.setDate(qday)
+            self._detail_date.blockSignals(True)
+            self._detail_date.setDate(qday)
+            self._detail_date.blockSignals(False)
+            self._save_filters()
+            if self._tabs.currentIndex() == 1:
+                self._schedule_detail_refresh()
 
     def _add_manual_time(self) -> None:
         hours = self._manual_hours.value()
@@ -486,7 +563,31 @@ class StatsWindow(QMainWindow):
     def _format_app_duration(self, seconds: int) -> str:
         return format_duration(seconds) if seconds > 0 else "—"
 
-    def refresh(self) -> None:
+    @staticmethod
+    def _merge_sessions(sessions: list[AppSessionRow]) -> list[AppSessionRow]:
+        """Склеить подряд идущие сессии одной программы."""
+        if not sessions:
+            return []
+        merged: list[AppSessionRow] = []
+        current = sessions[0]
+        for session in sessions[1:]:
+            if session.day == current.day and session.app_key == current.app_key:
+                current = AppSessionRow(
+                    day=current.day,
+                    start_time=current.start_time,
+                    end_time=session.end_time,
+                    app_key=current.app_key,
+                    app_name=current.app_name,
+                    total_seconds=current.total_seconds + session.total_seconds,
+                    active_seconds=current.active_seconds + session.active_seconds,
+                )
+            else:
+                merged.append(current)
+                current = session
+        merged.append(current)
+        return merged
+
+    def _refresh_summary(self) -> None:
         period = self._current_period()
         if period.start == period.end:
             self._range_label.setText(period.start.strftime("%d.%m.%Y"))
@@ -503,6 +604,7 @@ class StatsWindow(QMainWindow):
         if self._period_combo.currentData() == "day" and not days:
             days = list(period.days)
 
+        self._table.setUpdatesEnabled(False)
         self._table.blockSignals(True)
         self._table.setRowCount(len(days))
         for row, day_stats in enumerate(days):
@@ -514,6 +616,7 @@ class StatsWindow(QMainWindow):
             self._table.setItem(row, COL_END, QTableWidgetItem(day_stats.end_time or "—"))
             self._table.setItem(row, COL_TOTAL, self._right_item(format_duration(day_stats.total_seconds)))
             self._table.setItem(row, COL_ACTIVE, self._right_item(format_duration(day_stats.active_seconds)))
+            self._table.setItem(row, COL_RATIO, self._right_item(format_percent(day_stats.activity_ratio)))
             manual_text = (
                 format_duration(day_stats.manual_seconds)
                 if day_stats.manual_seconds > 0
@@ -528,19 +631,36 @@ class StatsWindow(QMainWindow):
                     self._right_item(self._format_app_duration(seconds)),
                 )
         self._table.blockSignals(False)
+        self._table.setUpdatesEnabled(True)
         self._apply_column_visibility()
 
-        sessions = self._storage.get_sessions(period.start, period.end)
+    def _refresh_detail(self, token: int | None = None) -> None:
+        if token is not None and token != self._detail_load_token:
+            return
+        if self._tabs.currentIndex() != 1:
+            return
+
+        day = self._qdate_to_date(self._detail_date.date())
+        sessions = self._merge_sessions(self._storage.get_sessions(day, day))
+        sessions = [s for s in sessions if s.total_seconds >= DETAIL_MIN_SECONDS]
+        weekday = WEEKDAYS_RU[day.weekday()]
+        self._detail_hint.setText(
+            f"Сессии за {day.strftime('%d.%m.%Y')} ({weekday}): {len(sessions)}"
+        )
+
+        self._detail_table.setUpdatesEnabled(False)
+        self._detail_table.clearContents()
         self._detail_table.setRowCount(len(sessions))
         for row, session in enumerate(sessions):
-            weekday = WEEKDAYS_RU[session.day.weekday()]
+            session_weekday = WEEKDAYS_RU[session.day.weekday()]
             self._detail_table.setItem(
                 row,
                 0,
-                QTableWidgetItem(f"{session.day.strftime('%d.%m.%Y')} ({weekday})"),
+                QTableWidgetItem(f"{session.day.strftime('%d.%m.%Y')} ({session_weekday})"),
             )
             self._detail_table.setItem(row, 1, QTableWidgetItem(session.start_time[:5]))
             self._detail_table.setItem(row, 2, QTableWidgetItem(session.end_time[:5]))
             self._detail_table.setItem(row, 3, QTableWidgetItem(session.app_name))
             self._detail_table.setItem(row, 4, self._right_item(format_duration(session.total_seconds)))
             self._detail_table.setItem(row, 5, self._right_item(format_duration(session.active_seconds)))
+        self._detail_table.setUpdatesEnabled(True)
